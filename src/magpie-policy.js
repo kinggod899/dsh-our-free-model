@@ -1,31 +1,35 @@
 /**
- * Account channels this build does not offer.
+ * Channel exclusion — local override: exclusion lifted.
  *
- * WorkBuddy is sold under two names and ships in two builds: the China build
- * ("workbuddy", also marketed as CodeBuddy) and the international build
- * ("workbuddy-ai"). Neither is offered: the community plugin that serves them
- * signs requests as WorkBuddy's own desktop client, which is a risk this
- * product will not carry. The engine is a pinned binary whose plugin market is
- * fetched at run time, so the exclusion is enforced here, at the management
- * boundary this application owns, rather than in the engine.
+ * Upstream 2.7.x ships this module as a deny list that removes WorkBuddy (China
+ * build "workbuddy" / CodeBuddy, international build "workbuddy-ai") and Huawei
+ * Cloud MaaS ("huaweicloud", including its CodeArts / ModelArts presets) from
+ * every surface: the provider directory, the preset list, the plugin market,
+ * the model catalogue, and the engine's own mutation routes.
  *
- * Huawei Cloud MaaS ("huaweicloud", its Token Plan preset) is likewise not
- * offered: this build carries no Huawei channel, and the engine's pinned preset
- * list is the one surface that would otherwise reintroduce it.
+ * This local build restores those channels. Rather than ripping the policy
+ * layer out of the three call sites (`magpie-engine.js`, `magpie-models.js`,
+ * `providers/index.js`), the deny list is emptied here: every predicate below
+ * now answers "not denied", so each filter becomes a pass-through and
+ * `assertEngineMutation` never throws. All exports and signatures are kept
+ * intact, which means the call sites need no changes and a future upstream
+ * update can be re-applied over this file without breaking the module graph.
  *
- * A channel is denied by its subscription id, by the preset that names it, by
- * the package that serves it, and by any name carrying one of the aliases below
- * — a third-party plugin can sign in to the same provider under any package
- * name, and the China build is listed under "CodeBuddy" as often as under
- * "WorkBuddy".
+ * The original deny list is preserved verbatim in
+ * `magpie-policy.js.bak-upstream-2.7.2` next to this file.
+ *
+ * The engine (vendor/magpie binary) never enforced this exclusion itself — the
+ * upstream comments are explicit that it is enforced only at this management
+ * boundary — so restoring the channels needs nothing beyond this file.
  */
 
-const DENIED_IDS = new Set(['workbuddy', 'workbuddy-ai', 'huaweicloud', 'codebuddy', 'codebuddy-cn', 'codearts'])
-// Aliases, not a product name filter: every spelling a package, preset, agent
-// or provider row could carry for one of these channels. "CodeArts" is Huawei
-// Cloud's own coding plan, served by a community plugin rather than a preset.
-const DENIED_TEXT = /workbuddy|codebuddy|huaweicloud|huawei[\s-]*cloud|modelarts|codearts|华为云|码道/i
-export const POLICY_REFUSED = 'WorkBuddy and Huawei Cloud are not offered by this build'
+// Empty on purpose: no subscription id is refused by this build.
+const DENIED_IDS = new Set()
+// Matches nothing on purpose. Kept as a RegExp so `deniedText` keeps its shape.
+const DENIED_TEXT = /(?!)/
+// Kept for the `failure.message === POLICY_REFUSED` comparison in
+// magpie-engine.js. With the deny list empty this string is never produced.
+export const POLICY_REFUSED = 'Channel refused by local policy'
 
 /**
  * Whether an account channel is excluded from this build. Both the embedded
@@ -59,9 +63,10 @@ function filterPluginsState(state) {
 
 function filterProviders(state) {
   if (!state || typeof state !== 'object') return state
-  // The pinned preset list is where Huawei Cloud's Token Plan would otherwise
-  // reappear as an addable vendor; an account already added keeps working and
-  // stays listed, so only the way onto the channel is withdrawn.
+  // Upstream used this pass to withdraw the way onto the excluded channels
+  // (their presets, move targets, plugin rows). Local override: every predicate
+  // is false, so each filter below keeps the row and the state passes through
+  // unchanged. The code is left in place so the shape matches upstream.
   if (Array.isArray(state.presets)) {
     state.presets = state.presets.filter(preset => !deniedId(preset?.id) && !deniedText(preset?.name)
       && !deniedText(preset?.short))

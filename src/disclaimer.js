@@ -2,12 +2,17 @@
  * The disclaimer copy both surfaces show: the plugin's settings page and the
  * standalone/desktop console.
  *
- * The product carries no WorkBuddy and no Huawei Cloud channel. Those two are
- * excluded mechanically (`src/magpie-policy.js`, and the aggregate registry
- * through it), but an exclusion with no explanation leaves a user wondering
- * whether the channel is broken. This copy answers the two questions that
- * matter instead: those channels are not part of what this build offers, and
- * anything a user does with a channel is their own responsibility.
+ * Local override: upstream 2.7.x opened this file by declaring that the product
+ * carries no WorkBuddy and no Huawei Cloud channel, and answered the natural
+ * follow-up ("is it broken?") by explaining the exclusion. This build restores
+ * those channels (see `src/magpie-policy.js`), so that section is gone — a
+ * disclaimer that still names them as absent would contradict the catalogue the
+ * user is looking at. The version is bumped so a stored acknowledgement from the
+ * previous copy is not treated as consent to this one.
+ *
+ * What remains is the part that does not depend on which channels exist: the
+ * project is a personal study project, third-party services are the user's own
+ * responsibility, credentials stay local, and there is no warranty.
  *
  * The copy is data, not markup: each surface renders it in its own idiom, so
  * there is exactly one place to change what the product says. It is deliberately
@@ -15,30 +20,25 @@
  * purpose plainly, because that is the honest description of what it is.
  */
 
-export const DISCLAIMER_VERSION = 2
+export const DISCLAIMER_VERSION = 3
 
-/** Channels this build does not offer, named for the reader. */
-export const EXCLUDED_CHANNELS = Object.freeze([
-  'WorkBuddy 国内版（workbuddy，亦称 CodeBuddy）',
-  'WorkBuddy 国际版（workbuddy-ai）',
-  '华为云 Huawei Cloud MaaS（huaweicloud，含 Token Plan）',
-])
+/**
+ * Channels this build does not offer. Empty: the local override restores every
+ * channel upstream used to withhold. Kept as a frozen array so any consumer
+ * that iterates it keeps working.
+ */
+export const EXCLUDED_CHANNELS = Object.freeze([])
 
 export const DISCLAIMER = Object.freeze({
   version: DISCLAIMER_VERSION,
   title: '使用须知与免责声明',
-  subtitle: '关于本插件未提供的渠道，以及你需要知道的责任边界',
+  subtitle: '关于第三方渠道的责任边界，以及你需要知道的事',
   intro: '本插件是一个个人学习与技术研究项目，用于学习模型网关、协议适配与本地路由的实现方式，按「现状」提供，不构成任何商业服务或产品承诺。',
   sections: Object.freeze([
     {
-      id: 'excluded',
-      heading: '本插件不提供这三个渠道',
-      body: '本插件不包含、也不提供 WorkBuddy 国内版（workbuddy，亦称 CodeBuddy）、WorkBuddy 国际版（workbuddy-ai）与华为云 Huawei Cloud MaaS（huaweicloud，含 Token Plan）。这三者在插件端与桌面端均被移除：渠道列表、预设、登录入口、插件市场与模型目录里都不会出现，也无法通过导入配置或安装第三方插件启用。目录中看不到它们不是故障，是本项目的明确取舍，后续更新不会重新引入。',
-    },
-    {
       id: 'responsibility',
       heading: '使用第三方渠道与我们无关',
-      body: '你若在本插件之外通过任何方式使用上述渠道或其他第三方服务，包括自行配置地址、导入凭据、安装第三方软件或登录他人账号，均属于你的个人行为，与本项目作者及团队无关。我们不参与、不背书、不提供支持，也不对其可用性、合规性或任何后果承担任何责任。',
+      body: '你若在本插件之外通过任何方式使用第三方渠道或第三方服务，包括自行配置地址、导入凭据、安装第三方软件或登录他人账号，均属于你的个人行为，与本项目作者及团队无关。我们不参与、不背书、不提供支持，也不对其可用性、合规性或任何后果承担任何责任。',
     },
     {
       id: 'accounts',

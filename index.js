@@ -1052,7 +1052,7 @@ export function apply(ctx, config) {
         outlet: { active: egressActive, fetch: egressFetch },
       })
       channelPack = { state: 'ready', error: '' }
-      logger.info?.('our-free-model: free-channel pack mounted (10 account providers)')
+      logger.info?.('our-free-model: free-channel pack mounted (13 account providers)')
     }).catch(error => {
       if (stopped) return
       channelPack = { state: 'failed', error: String(error?.message ?? error).slice(0, 300) }
