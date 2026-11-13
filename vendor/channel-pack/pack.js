@@ -1470,7 +1470,18 @@ async function requestToken(body, keyPair, fetcher = fetch) {
   if (!response.ok || !data?.credentials) {
     const message2 = `CodeArts token request failed: ${response.status}${data ? ` ${JSON.stringify(data)}` : ""}`;
     const errorCode = String(data?.error_code ?? "");
-    if (data?.error === "invalid_grant" || errorCode.includes("ExpiredRefreshToken")) {
+    const errorText = String(data?.error_msg ?? data?.error_description ?? "");
+    // 华为 STS 的 refresh_token 是**一次性**的：签发新凭据的同时旧值即失效，
+    // 第二次使用回 `STS5.1806 invalid refresh token: 'the refresh token has been used'`。
+    // 这是**终态**（只能重新登录），必须识别成 RefreshTokenExpiredError，
+    // 否则会被当成「临时网络/服务端故障」反复重试，而每次重试都不会成功，
+    // 最终凭据到期后所有请求 401 → UI 只显示「API 密钥无效」，看不出真因。
+    if (
+      data?.error === "invalid_grant" ||
+      errorCode.includes("ExpiredRefreshToken") ||
+      errorCode === "STS5.1806" ||
+      /invalid\s+refresh\s+token|refresh\s+token\s+has\s+been\s+used|refresh\s+token\s+(is\s+)?(invalid|expired)/i.test(errorText)
+    ) {
       throw new RefreshTokenExpiredError(message2);
     }
     throw new Error(message2);
@@ -31243,7 +31254,7 @@ function queueDelayMs(info) {
 }
 
 // vendor/channel-pack/src/models.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
 
 // vendor/channel-pack/src/sign.ts
 async function sha256Hex(data) {
@@ -31296,7 +31307,16 @@ var OPENGW_GATEWAY_CONFIG_URL = "https://opengw.developer.huaweicloud.com/api/v1
 var SNAP_MODEL_BUILTIN_URL = "https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin";
 var CODEARTS_MODELS_CACHE_FILENAME = "codearts_models.json";
 var CODEARTS_BENEFIT_CACHE_FILENAME = "codearts_benefit_models.json";
-var CODEARTS_BENEFIT_FALLBACK = ["glm-5.3-flash", "deepseek-v4.1-flash"];
+// 福利名单缓存的最长可信年龄。上游 `gateway/config` 不返回名单时
+// `saveBenefitCache` 不会被调用，文件会永久停在最后一次成功那天，
+// 所以必须靠 mtime 兜底（判据见 loadBenefitCache）。
+var BENEFIT_CACHE_MAX_AGE_MS = 24 * 36e5;
+// ⚠️ 冷启动兜底名单已清空（2026-11-02 实测）。
+// 原值 ["glm-5.3-flash","deepseek-v4.1-flash"] 是 2026-10-20 的快照，
+// 而华为云「限时福利」路由自 2026-10-21 起整体下线，两个 id 都已被上游
+// 回 `InferHub.4004.200 benefit not found`。继续拿它兜底 = 每轮多发一次
+// 必然失败的请求。名单只能来自 `gateway/config` 的亲口答复（且需新鲜）。
+var CODEARTS_BENEFIT_FALLBACK = [];
 var FETCH_TIMEOUT_MS = 1e4;
 var MODEL_REFRESH_INTERVAL_MS = 2 * 36e5;
 var memoryCache;
@@ -31446,6 +31466,16 @@ function loadBenefitCache() {
   if (!path2) return void 0;
   try {
     if (!existsSync3(path2)) return void 0;
+    // 福利名单是**按账号授予**的，而且会整体消失：`opengw` 的
+    // `gateway/config` 一旦返回 `result: null`（渠道下线），
+    // `saveBenefitCache` 就再也不会被调用，文件会**永远停在最后一次成功的那天**。
+    // 实测（2026-11-02）：本地这份停在 2026-10-20，内容
+    // `["glm-5.3-flash","deepseek-v4.1-flash"]`，而福利路由自 2026-10-21 起
+    // 整体不可用 —— 照它发 `maas_type: benefit` 会被上游回
+    // `InferHub.4004.200 benefit not found`，每轮白烧一次请求。
+    // 因此按 mtime 判新鲜度：超期就当没有，宁可少发一个头也不要发错头。
+    const ageMs = Date.now() - statSync3(path2).mtimeMs;
+    if (!Number.isFinite(ageMs) || ageMs > BENEFIT_CACHE_MAX_AGE_MS) return void 0;
     const text = readFileSync3(path2, "utf-8");
     const ids = JSON.parse(text);
     if (!Array.isArray(ids) || ids.length === 0) return void 0;
@@ -32624,16 +32654,21 @@ var CHAT_API_BASE = "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2";
 var PROVIDER = "codearts";
 var BENEFIT_NOT_FOUND_CODE = "BENEFIT_NOT_FOUND";
 var CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE = "InferHub.4004.200";
+// 冷启动兜底模型清单。**只在 `remoteModels` 为空（上游拉取失败）时使用**。
+// 2026-11-02 按 `GET /v1/model/builtin` 的真实返回重写：原名单里的
+// GLM-5.1 / GLM-5 / deepseek-v4-flash / deepseek-v4-pro 已被上游下线，
+// 留着它们等于让用户在拉取失败时看到一批点不动的死模型。
 var DEFAULT_MODELS = [
   "GLM-5.2",
-  "GLM-5.1",
-  "GLM-5",
+  "glm-5.3",
   "glm-5.3-flash",
+  "glm-5.2-sft-harmony",
   "openpangu-2.0-flash",
   "openpangu-2.0-pro",
-  "deepseek-v4-flash",
-  "deepseek-v4-pro",
-  "deepseek-v4.1-flash"
+  "deepseek-v4.1-flash",
+  "kimi-k2.6-vl",
+  "kimi-k3",
+  "kimi-k3.1-pro"
 ];
 var CONTEXT_WINDOWS = /* @__PURE__ */ new Map([
   ["GLM-5.2", 202752],
@@ -33205,6 +33240,15 @@ var CodeArtsAdapter = class extends LlmAdapter {
         extraSignedHeaders
       );
       const headers = new Headers(attributionHeaders());
+      // 2026-11-07：华为云 snap-access 网关按 User-Agent 风控 —— 带
+      // "deepseek-harness" 归因头的 chat 请求一律被回 403
+      // {"error_code":"TM.00000001","error_msg":"网络繁忙，请稍后重试"}，
+      // 而 pack 把 403 当鉴权失败，会去刷新凭据（华为 STS refresh_token
+      // 一次性）并最终在界面弹「API 密钥无效」。UA 交替对照实测：同一套
+      // AK/SK 签名、同一个请求体，harness UA 两次 403、中性 UA 两次 200
+      // 且正常出字。只覆盖 codearts 这条上游，其它渠道仍保留宿主归因头。
+      // UA 不在 signRequestHuawei 的 signedMap 里，改它不破坏签名。
+      headers.set("User-Agent", "Mozilla/5.0");
       signed.forEach((value, key) => {
         if (key !== "content-type") headers.set(key, value);
       });
@@ -33259,14 +33303,49 @@ var CodeArtsAdapter = class extends LlmAdapter {
         }
       } else {
         const errorText = await response.text().catch(() => "");
-        if (isAuthError(response.status, errorText) && !authRefreshed) {
-          authRefreshed = true;
-          await this.options.refresh();
-          credential = await this.options.resolveCredential();
-          if (credential === void 0 || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
-            throw new LlmError2("codearts: credential missing after refresh; log in again", "MISSING_CREDENTIAL");
+        // 2026-11-07：403 + TM.00000001「网络繁忙」是网关流控/风控，不是鉴权
+        // 失败。绝不能走 refresh()（refresh_token 一次性，误刷新会烧掉凭据），
+        // 也不该在界面弹「API 密钥无效」。给一个可重试的明确错误，让上层
+        // 按限流退避，而不是把用户引去改密钥。
+        const gatewayBusy = response.status === 403 && /TM\.00000001|网络繁忙|请稍后重试/i.test(errorText);
+        if (gatewayBusy) {
+          throw new LlmError2(
+            `codearts: \u534E\u4E3A\u4E91\u7F51\u5173\u7E41\u5FD9/\u9650\u6D41\uFF08HTTP 403\uFF09\uFF0C\u4E0D\u662F\u5BC6\u94A5\u95EE\u9898\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002\u4E0A\u6E38\u539F\u6587\uFF1A${errorDetail(errorText).slice(0, 200)}`,
+            "RATE_LIMIT",
+            { status: response.status }
+          );
+        }
+        if (isAuthError(response.status, errorText)) {
+          if (!authRefreshed) {
+            authRefreshed = true;
+            try {
+              await this.options.refresh();
+            } catch (refreshError) {
+              // 续期抛错 = 终态（refresh_token 一次性/已过期），再重试也没用。
+              // 这里必须给出可执行的话术：框架只认 `AUTH` 这个码，
+              // 落到界面上会被统一翻成「API 密钥无效」，而真正要用户做的是**重新登录**。
+              throw new LlmError2(
+                `codearts: \u51ED\u636E\u5DF2\u8FC7\u671F\uFF0C\u7EED\u671F\u5931\u8D25 \u2014\u2014 \u534E\u4E3A STS \u7684 refresh_token \u662F\u4E00\u6B21\u6027\u7684\uFF0C\u88AB\u6D88\u8D39\u8FC7\u4E00\u6B21\u5373\u6C38\u4E45\u5931\u6548\u3002\u8BF7\u5728 Channel Pack \u91CC\u91CD\u65B0\u767B\u5F55\u534E\u4E3A\u4E91\u6E20\u9053\u3002\u4E0A\u6E38\u539F\u6587\uFF1A${errorMessage(refreshError).slice(0, 240)}`,
+                "AUTH",
+                { status: response.status }
+              );
+            }
+            credential = await this.options.resolveCredential();
+            if (credential === void 0 || !credential.access_key_id || !credential.secret_access_key || !credential.security_token) {
+              throw new LlmError2("codearts: credential missing after refresh; log in again", "MISSING_CREDENTIAL");
+            }
+            continue;
           }
-          continue;
+          // 续期过一轮仍是 401/403。**不要**把原因咬死在 refresh_token 上：
+          // 实测（2026-11-02）这里最常见的是「本机中间层改写了请求体，导致
+          // AK/SK 签名失效」——例如 billion-context（bili）这类上下文压缩代理，
+          // 它对签名请求只有「重签+压缩」或「拒发」两种选择，拒发时回 403 并把
+          // 自己的说明放在 body 里。所以必须把**上游原文**放前面，让用户一眼看到真因。
+          throw new LlmError2(
+            `codearts: \u9274\u6743\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u4E14\u7EED\u671F\u540E\u4ECD\u5931\u8D25\u3002\u4E0A\u6E38\u539F\u6587\uFF1A${errorDetail(errorText).slice(0, 300)}\u3002\u5E38\u89C1\u539F\u56E0\uFF1A\u2460 refresh_token \u5DF2\u88AB\u6D88\u8D39\uFF08\u534E\u4E3A STS \u4E00\u6B21\u6027\uFF09\u6216\u8FC7\u671F \u2192 \u91CD\u65B0\u767B\u5F55\uFF1B\u2461 \u672C\u673A\u4E2D\u95F4\u5C42\uFF08\u4E0A\u4E0B\u6587\u538B\u7F29/\u63D0\u793A\u7F13\u5B58\u4EE3\u7406\uFF09\u91CD\u5199\u4E86\u8BF7\u6C42\u4F53\uFF0C\u4F7F AK/SK \u7B7E\u540D\u5931\u6548 \u2192 \u8BA9\u5B83\u5BF9 sdk-hmac-sha256 \u914D\u7F6E passthrough \u6216\u91CD\u7B7E\u3002`,
+            "AUTH",
+            { status: response.status }
+          );
         }
         if (isSseQuotaExhaustedErrorCode(errorDetail(errorText), errorText)) {
           const message2 = codeartsQuotaExhaustedMessage(options.model, nextUtc8DayStartMs());
@@ -33702,7 +33781,7 @@ var CodeArtsAdapter = class extends LlmAdapter {
   }
 };
 function registerCodeArtsLlm(ctx, options) {
-  const adapter = new CodeArtsAdapter(options);
+  const adapter = withQueueAccountRotation(PROVIDER, options, (scoped) => new CodeArtsAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [PROVIDER], adapter);
   return adapter;
 }
@@ -34775,6 +34854,8 @@ function errorMessage2(error) {
     return "unknown error";
   }
 }
+/** 11140 最多换几个号（含初始那次）。2 = 初始 + 1 次换号。 */
+var BUDDY_POLICY_MAX_ROTATIONS = 2;
 function isContentRejection(body) {
   if (body.length === 0) return false;
   try {
@@ -35388,6 +35469,9 @@ var BuddyAdapter = class _BuddyAdapter extends LlmAdapter2 {
       let rejectionStatus = contentRejected ? authStatus : 0;
       let rejectionBody = contentRejected ? rejectedBody : "";
       if ((response.status === 401 || response.status === 403) && this.options.accountPool !== void 0) {
+        // 11140（request illegal）是内容策略拒绝：初始那次已算一次，最多再换 1 个号。
+        // 换到底只会把整池账号都标上策略冷却，而拒绝是确定性的 —— 重试换不出答案。
+        let policyRejections = contentRejected ? 1 : 0;
         for (; ; ) {
           const next = await this.options.accountPool.getAvailableAccount(
             this.product.id,
@@ -35415,6 +35499,13 @@ var BuddyAdapter = class _BuddyAdapter extends LlmAdapter2 {
               currentAccountId,
               options.model
             );
+            policyRejections += 1;
+            if (policyRejections >= BUDDY_POLICY_MAX_ROTATIONS) {
+              console.warn(
+                "[" + this.product.id + "] " + "\u8FDE\u7EED " + policyRejections + " \u4E2A\u8D26\u53F7\u88AB\u5B89\u5168\u7B56\u7565\u62E6\u622A\uFF08code 11140\uFF09\uFF0C\u505C\u6B62\u6362\u53F7\uFF1A\u8BE5\u62D2\u7EDD\u591A\u534A\u4E0E\u8BF7\u6C42\u5185\u5BB9\u6709\u5173\uFF0C\u6362\u53F7\u53EA\u4F1A\u767D\u70E7\u989D\u5EA6\u3002"
+              );
+              break;
+            }
           }
           if (response.status !== 401 && response.status !== 403) break;
         }
@@ -35870,7 +35961,7 @@ function positiveMaxTokens(value) {
 }
 function registerBuddyLlm(ctx, options) {
   const product = options.product ?? CODEBUDDY;
-  const adapter = new BuddyAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new BuddyAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -37158,7 +37249,7 @@ function displayNameFor2(model) {
 }
 function registerLobsteraiLlm(ctx, options) {
   const product = options.product ?? LOBSTERAI;
-  const adapter = new LobsteraiAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new LobsteraiAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -39160,7 +39251,7 @@ function qoderDisplayName(model, now = /* @__PURE__ */ new Date()) {
 }
 function registerQoderLlm(ctx, options) {
   const product = options.product ?? QODER;
-  const adapter = new QoderAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new QoderAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -41046,7 +41137,7 @@ var TraeAdapter = class extends LlmAdapter5 {
 };
 function registerTraeLlm(ctx, options) {
   const product = options.product ?? TRAE;
-  const adapter = new TraeAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new TraeAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -42277,7 +42368,7 @@ var CLINE_REGION_FORBIDDEN_MARKERS = [
 ];
 function registerClineLlm(ctx, options) {
   const product = options.product ?? CLINE;
-  const adapter = new ClineAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new ClineAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -42724,7 +42815,7 @@ function resolveChunkTimeoutMs7() {
 }
 function registerLoomyLlm(ctx, options) {
   const product = options.product ?? LOOMY;
-  const adapter = new LoomyAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new LoomyAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -43211,7 +43302,7 @@ function resolveChunkTimeoutMs8() {
 }
 function registerRaccoonLlm(ctx, options) {
   const product = options.product ?? RACCOON;
-  const adapter = new RaccoonAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new RaccoonAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -55448,7 +55539,7 @@ function httpErrorCodeForZcode(status, body) {
 }
 function registerZcodeLlm(ctx, options) {
   const product = options.product ?? ZCODE;
-  const adapter = new ZcodeAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new ZcodeAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -58946,7 +59037,7 @@ var GeminiAdapter = class extends LlmAdapter10 {
 };
 function registerGeminiLlm(ctx, options) {
   const product = options.product ?? GEMINI;
-  const adapter = new GeminiAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new GeminiAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -58955,6 +59046,20 @@ function registerGeminiLlm(ctx, options) {
 var TRAE_PROVIDER_ID = "trae";
 var PROBE_PROMPT = "\u53EA\u56DE\u7B54\u4E24\u4E2A\u5B57\uFF1A\u6536\u5230";
 var PROBE_SYSTEM = "You are a helpful assistant.";
+// ── 探测体积（对照仓库 A2）────────────────────────────────────────────
+// 上游限流按**请求体积**触发：约 20k token 能过、约 30k 被拒。所以「发一句
+// 只回答两个字看通不通」的探测会通过，而真实长对话每次都被拒 —— 这正是
+// 「测试通过、实际被限」的来源。下面用重复句构造约 25k token 的输入。
+//
+// 只对 workbuddy / buddy 生效：这两个渠道共用同一个按体积限流的网关；
+// 其余渠道维持一句话，否则一次「全部重测」会把 17 个渠道的成本一起抬上去。
+var PROBE_FILLER_SENTENCE = "The quick brown fox jumps over the lazy dog while the calm river keeps flowing east. ";
+var PROBE_FILLER_REPEAT = 1200;
+var PROBE_PROMPT_LONG = "\u53EA\u56DE\u7B54\u4E24\u4E2A\u5B57\uFF1A\u6536\u5230\n\n" + PROBE_FILLER_SENTENCE.repeat(PROBE_FILLER_REPEAT);
+var PROBE_LONG_PROVIDERS = /* @__PURE__ */ new Set(["workbuddy", "buddy"]);
+function probePromptFor(provider) {
+  return PROBE_LONG_PROVIDERS.has(provider) ? PROBE_PROMPT_LONG : PROBE_PROMPT;
+}
 var PROBE_TIMEOUT_MS = 12e4;
 function isRateLimitFailure(error) {
   if (error instanceof LlmError16) {
@@ -59043,7 +59148,7 @@ async function probeWithAdapter(entry, credential, modelId, timeoutMs) {
       provider: entry.provider,
       model: modelId,
       messages: [createUserMessage({
-        content: [{ type: "text", text: PROBE_PROMPT }],
+        content: [{ type: "text", text: probePromptFor(entry.provider) }],
         source: { kind: "user" }
       })],
       // ⚠️ **必须传 system**，否则 WorkBuddy 网关返回 400 + code 11128
@@ -60922,6 +61027,28 @@ function registerChannelPackEndpoints(ctx, pool, codearts, buddy, workbuddy, lob
           });
           started.result.then(async (loginResult) => {
             const credential = parseCodeArtsCredential(loginResult.access);
+            // ── 重登去重 ──────────────────────────────────────────────
+            // 上游每次登录都会生成新的随机 id 与凭据 ref，同一个华为云账号
+            // 重登就会重复登记（参照 dsh-codearts 的 accountIdOf 四级退让）。
+            // 这里按稳定身份字段反查已有条目：user_id → user_name → access_key_id。
+            // 字段全缺失时跳过（视为「无法判断」），保持原有行为不变。
+            let duplicateOf = "";
+            if (credential !== void 0) {
+              for (const field of ["user_id", "user_name", "access_key_id"]) {
+                const value = credential[field];
+                if (typeof value !== "string" || value.length === 0) continue;
+                const existingId = await pool.findAccountIdByIdentityField("codearts", field, value).catch(() => "");
+                if (existingId.length > 0 && existingId !== id) {
+                  duplicateOf = existingId;
+                  break;
+                }
+              }
+            }
+            if (duplicateOf.length > 0) {
+              ctx.logger.warn(`[channel-pack] codearts \u8BE5\u8D26\u53F7\u5DF2\u5B58\u5728\u4E8E ${duplicateOf}\uFF0C\u65B0\u6761\u76EE ${id} \u5DF2\u81EA\u52A8\u505C\u7528\uFF08\u4E0D\u53C2\u4E0E\u9009\u53F7\uFF09`);
+              await pool.updateAccount(id, { nickname: "CodeArts\uFF08\u91CD\u590D\uFF0C\u5DF2\u505C\u7528\uFF09", enabled: false });
+              return;
+            }
             await pool.updateAccount(id, {
               nickname: credential?.user_name !== void 0 && credential.user_name.length > 0 ? credential.user_name : id,
               expiresAt: credential?.expires_at !== void 0 ? Number.isNaN(Date.parse(credential.expires_at)) ? void 0 : Date.parse(credential.expires_at) : void 0,
@@ -66473,7 +66600,7 @@ var MinimaxAdapter = class extends LlmAdapter11 {
 };
 function registerMinimaxLlm(ctx, options) {
   const product = options.product ?? MINIMAX;
-  const adapter = new MinimaxAdapter(options);
+  const adapter = withQueueAccountRotation(product.id, options, (scoped) => new MinimaxAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [product.id], adapter);
   return adapter;
 }
@@ -68147,7 +68274,7 @@ function sessionIdOf(options) {
   return created;
 }
 function registerOpencodeLlm(ctx, options) {
-  const adapter = new OpencodeAdapter(options);
+  const adapter = withQueueAccountRotation(OPENCODE.id, options, (scoped) => new OpencodeAdapter(scoped));
   registerAdapterIdempotent(ctx.llm, [OPENCODE.id], adapter);
   return adapter;
 }
@@ -69206,6 +69333,204 @@ function apply(ctx, config = {}) {
   installLoopResume(ctx);
   ctx.provide("accountPool", pool);
 }
+
+// vendor/channel-pack/src/queue-rotation.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { LlmError as LlmError21 } from "@deepseek-ai/dsh-llm";
+var requests = new AsyncLocalStorage();
+function reportQueueSlot(slot2) {
+  const request = requests.getStore();
+  if (request?.provider !== "opencode") return;
+  request.slot = slot2;
+  request.tried.add(slot2.id);
+}
+function wait(ms, signal) {
+  signal?.throwIfAborted();
+  return new Promise((resolve2, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve2();
+    };
+    const timer = setTimeout(finish, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+function withQueueAccountRotation(provider, options, create, timing = {}) {
+  const now = timing.now ?? Date.now;
+  const sleep4 = timing.sleep ?? wait;
+  const active = () => {
+    const request = requests.getStore();
+    return request?.owner === options ? request : void 0;
+  };
+  const remember = (request, account) => {
+    request.account = account;
+    request.tried.add(account.entry.id);
+    reportLedgerAccount(provider, account.entry.id);
+  };
+  const scoped = { ...options };
+  const pool = options.accountPool;
+  if (pool !== void 0) {
+    scoped.accountPool = new Proxy(pool, {
+      get(target, prop) {
+        if (prop === "getAvailableAccount") {
+          return async (id, model, excluded) => {
+            const request = active();
+            const relevant = request !== void 0 && id === provider && model === request.model;
+            const skipped = relevant ? /* @__PURE__ */ new Set([...request.tried, ...excluded ?? []]) : excluded;
+            const account = await target.getAvailableAccount(id, model, skipped);
+            if (account !== null && relevant) remember(request, account);
+            return account;
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    if (options.nextAccount !== void 0) {
+      scoped.nextAccount = async (model, tried) => {
+        const request = active();
+        const relevant = request !== void 0 && model === request.model;
+        const next = await options.nextAccount(model, relevant ? /* @__PURE__ */ new Set([...tried, ...request.tried]) : tried);
+        if (next !== void 0 && relevant) {
+          const entry = pool.listAccountsByProvider(provider).find((account) => account.id === next.accountId);
+          if (entry !== void 0) remember(request, { entry, credential: next.credential });
+        }
+        return next;
+      };
+    }
+    if (options.resolveCredential !== void 0) {
+      scoped.resolveCredential = async (model) => {
+        const request = active();
+        if (request?.account !== void 0) {
+          const others = new Set(pool.listAccountsByProvider(provider).filter((account) => account.id !== request.account.entry.id).map((account) => account.id));
+          if (options.nextAccount !== void 0) {
+            const next2 = await options.nextAccount(request.model, others) ?? await options.nextAccount(request.model, request.tried);
+            if (next2 === void 0) {
+              throw new LlmError21(`${provider}: \u5F53\u524D\u8D26\u53F7\u4E0D\u53EF\u7528\u6216\u65E0\u6CD5\u786E\u8BA4\u4F59\u989D\uFF0C\u4E14\u6CA1\u6709\u7B26\u5408\u6E20\u9053\u7B56\u7565\u7684\u5907\u7528\u8D26\u53F7`, "QUEUE");
+            }
+            const entry = pool.listAccountsByProvider(provider).find((account) => account.id === next2.accountId && account.enabled && !((account.modelRateLimits?.[request.model] ?? 0) > Date.now()));
+            if (entry === void 0) throw new LlmError21(`${provider}: \u5F53\u524D\u8BF7\u6C42\u7684\u8D26\u53F7\u5DF2\u79FB\u9664\u3001\u505C\u7528\u6216\u53D7\u9650`, "QUEUE");
+            remember(request, { entry, credential: next2.credential });
+            return next2.credential;
+          }
+          const next = await pool.getAvailableAccount(provider, request.model, others) ?? await pool.getAvailableAccount(provider, request.model, request.tried);
+          if (next === null) throw new LlmError21(`${provider}: \u5F53\u524D\u8D26\u53F7\u4E0D\u53EF\u7528\uFF0C\u4E14\u6CA1\u6709\u53EF\u7528\u7684\u5907\u7528\u8D26\u53F7`, "QUEUE");
+          remember(request, next);
+          return next.credential;
+        }
+        const credential = await options.resolveCredential(model);
+        if (request !== void 0 && credential !== null && typeof credential === "object") {
+          const field = provider === "zcode" ? "zcode_jwt" : "access_token";
+          const token = credential[field];
+          if (typeof token === "string" && token.length > 0) {
+            const id = await pool.findAccountIdByIdentityField(provider, field, token).catch(() => "");
+            const entry = pool.listAccountsByProvider(provider).find((account) => account.id === id && account.enabled);
+            if (entry !== void 0) remember(request, { entry, credential });
+          }
+        }
+        return credential;
+      };
+    }
+    if (options.currentAccountId !== void 0) {
+      scoped.currentAccountId = () => active()?.account?.entry.id ?? options.currentAccountId();
+    }
+  }
+  if (options.refresh !== void 0) {
+    scoped.refresh = async (accountId, reason) => {
+      const request = active();
+      const id = accountId ?? request?.account?.entry.id;
+      if (request !== void 0) {
+        const budget = reason === "auth" ? request.authRefreshes : request.credentialRefreshes;
+        if (budget.has(id)) throw new LlmError21(`${provider}: \u5F53\u524D\u8D26\u53F7\u5DF2\u5C1D\u8BD5${reason === "auth" ? "\u8BA4\u8BC1\u7EED\u671F" : "\u51ED\u636E\u5237\u65B0"}\uFF0C\u505C\u6B62\u91CD\u590D\u5237\u65B0`, "AUTH");
+        budget.add(id);
+      }
+      return options.refresh(id, reason);
+    };
+  }
+  if (options.identitySlots !== void 0) {
+    scoped.identitySlots = async () => {
+      const request = active();
+      const slots = await options.identitySlots(request?.model);
+      if (request?.slot === void 0) return slots;
+      const current = slots.find((slot2) => slot2.id === request.slot.id);
+      return [...current === void 0 ? [] : [current], ...slots.filter((slot2) => !request.tried.has(slot2.id))];
+    };
+  }
+  const adapter = create(scoped);
+  const stream = async function* (input, open) {
+    const { model, signal } = input;
+    const request = { owner: options, provider, model, tried: /* @__PURE__ */ new Set(), credentialRefreshes: /* @__PURE__ */ new Set(), authRefreshes: /* @__PURE__ */ new Set() };
+    const deadline = now() + 30 * 6e4;
+    let attempts = 0, queued = 0, since;
+    let delivered = false;
+    for (; ; ) {
+      signal?.throwIfAborted();
+      if (now() >= deadline) throw new LlmError21(`${provider}: \u6392\u961F\u7B49\u5F85\u8D85\u65F6`, "QUEUE");
+      const iterator = open()[Symbol.asyncIterator]();
+      try {
+        for (; ; ) {
+          const step = await requests.run(request, () => iterator.next());
+          if (step.done) return;
+          delivered = true;
+          yield step.value;
+        }
+      } catch (error) {
+        if (!(error instanceof ModelQueuedError) || delivered) throw error;
+        signal?.throwIfAborted();
+        if (++attempts > QUEUE_MAX_ATTEMPTS || now() >= deadline) {
+          throw new LlmError21(`${provider}: \u6392\u961F\u91CD\u8BD5\u6B21\u6570\u6216\u7B49\u5F85\u65F6\u95F4\u5DF2\u7528\u5C3D`, "QUEUE");
+        }
+        queued += 1;
+        since ??= now();
+        if (queued >= 3 || now() - since >= 2e4) {
+          queued = 0;
+          since = now();
+          if (scoped.nextAccount !== void 0) {
+            const next = await requests.run(request, () => scoped.nextAccount(model, request.tried));
+            if (next !== void 0) continue;
+          } else if (pool !== void 0) {
+            const next = await pool.getAvailableAccount(provider, model, request.tried);
+            if (next !== null) {
+              remember(request, next);
+              continue;
+            }
+          } else if (options.identitySlots !== void 0 && request.slot !== void 0) {
+            const next = pickSlot(await options.identitySlots(model), model, request.tried);
+            if (next !== void 0) {
+              request.slot = next;
+              request.tried.add(next.id);
+              continue;
+            }
+          }
+        }
+        await sleep4(Math.min(Math.max(100, error.retryAfterMs ?? 1e3), QUEUE_MAX_DELAY_MS, deadline - now()), signal);
+      } finally {
+        await requests.run(request, () => iterator.return?.());
+      }
+    }
+  };
+  return new Proxy(adapter, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (prop === "stream" && typeof value === "function") {
+        return (input) => stream(input, () => value.call(target, input));
+      }
+      if (prop === "prepareCall" && typeof value === "function") {
+        return async (...args) => {
+          const call = await value.apply(target, args);
+          return { ...call, stream: (input) => stream(input, () => call.stream(input)) };
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
 export {
   Config,
   apply,
